@@ -134,7 +134,7 @@ def generate_identical_consolidado(pivot_path, output_path):
 # ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Generador Consolidado", layout="centered")
 st.title("📑 Generador de Consolidado de Contratos")
-st.caption("Sube el Pivot de Ariba y descarga un archivo con formato 100% idéntico al Consolidado oficial.")
+st.caption("Sube el Pivot de Ariba y descarga el Consolidado de Contratos.")
 
 uploaded_file = st.file_uploader("📥 Selecciona el archivo Pivot (.xlsx)", type=["xlsx"])
 
