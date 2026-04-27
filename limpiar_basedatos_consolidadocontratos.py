@@ -10,33 +10,69 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ─────────────────────────────────────────────────────────────
-# ✅ LISTA MAESTRA DE COMPRADORES (CLASIFICACIÓN ESTRICTA)
+# ✅ LISTA MAESTRA ESTRICTA (SOLO ESTOS NOMBRES SOBREVIVEN)
 # ─────────────────────────────────────────────────────────────
-STRATEGIC_CHILE = {'Patricio Espinoza', 'Jorge Urrutia', 'Bárbara García', 'Claudio Berrios'}
-STRATEGIC_PROYECTOS = {'Martina Cifuentes', 'Joseph España'}
-STRATEGIC_CORPORATIVO = {'Michelle Palma', 'Juan Figueroa', 'Magdalena Farias', 'Denisse Andrea Gonzalez Terrile'}
-ALL_STRATEGIC = STRATEGIC_CHILE | STRATEGIC_PROYECTOS | STRATEGIC_CORPORATIVO
+STRATEGIC_BUYERS = {
+    'Patricio Espinoza', 'Jorge Urrutia', 'Bárbara García', 'Claudio Berrios',
+    'Martina Cifuentes', 'Joseph España',
+    'Michelle Palma', 'Juan Figueroa', 'Magdalena Farias', 'Denisse Andrea Gonzalez Terrile'
+}
 
-TACTICAL_BUYERS = {'Leonardo Nacarate', 'Martina Cifuentes', 'Scarlette Lucero', 'Margarita Lineros', 'Erika Silva', 'Karina Satelo', 'Pablo Labs', 'Dayana Dávila', 'BPO'}
+TACTICAL_BUYERS = {
+    'Leonardo Nacarate', 'Martina Cifuentes', 'Scarlette Lucero',
+    'Margarita Lineros', 'Erika Silva', 'Karina Satelo', 'Pablo Labs', 'Dayana Dávila', 'BPO'
+}
 
-def normalize_name(name):
-    if pd.isna(name) or str(name).strip() == '': return ''
-    clean = str(name).strip().title()
-    return clean.replace('Jorgue', 'Jorge').replace('Uturria', 'Urrutia')
+ALL_VALID_BUYERS = STRATEGIC_BUYERS | TACTICAL_BUYERS
 
-def classify_buyer_robust(raw_name: str) -> tuple:
-    clean_name = normalize_name(raw_name)
-    if not clean_name: return '', ''
+# Mapeo de variaciones comunes encontradas en el Pivot → Nombre Oficial
+NAME_VARIATIONS = {
+    'juan daniel figueroa': 'Juan Figueroa',
+    'jorgue urrutia': 'Jorge Urrutia',
+    'jorge uturria': 'Jorge Urrutia',
+    'joseph eduardo españa escalona': 'Joseph España',
+    'denisse andrea gonzales terrile': 'Denisse Andrea Gonzalez Terrile',
+    'denisse andrea gonzalez': 'Denisse Andrea Gonzalez Terrile',
+    'leonardo nacarete': 'Leonardo Nacarate',
+    'margarita': 'Margarita Lineros',
+    'erika': 'Erika Silva',
+    'karina': 'Karina Satelo',
+    'pablo labs': 'Pablo Labs',
+    'bpo': 'BPO'
+}
+
+def normalize_name(name: str) -> str:
+    if pd.isna(name) or str(name).strip() == '':
+        return ''
+    clean = str(name).strip().lower()
+    # Eliminar acentos para matching robusto
+    clean = ''.join(c for c in clean if c not in 'áéíóúüñ')
+    return clean
+
+def classify_buyer_strict(raw_name: str) -> tuple:
+    clean_raw = normalize_name(raw_name)
+    if not clean_raw: return '', ''
     
-    name_parts = clean_name.split()
-    short_name = ' '.join(name_parts[:2]) if len(name_parts) >= 2 else clean_name
+    # 1. Buscar en variaciones conocidas
+    official_name = NAME_VARIATIONS.get(clean_raw, None)
     
-    for strat in ALL_STRATEGIC:
-        if clean_name == strat or strat in clean_name or clean_name in strat or short_name in strat or strat in short_name:
-            return strat, ''
-    for tact in TACTICAL_BUYERS:
-        if clean_name == tact or tact in clean_name or clean_name in tact or short_name in tact or tact in short_name:
-            return '', tact
+    # 2. Si no hay variación, buscar match exacto en listas oficiales
+    if official_name is None:
+        # Intentar match directo con listas (sin acentos)
+        for official in ALL_VALID_BUYERS:
+            if clean_raw == normalize_name(official):
+                official_name = official
+                break
+                
+    # 3. Si no coincide con NADA oficial, retornar vacío (la fila será eliminada después)
+    if official_name is None:
+        return '', ''
+        
+    # 4. Asignar a columna según categoría
+    if official_name in STRATEGIC_BUYERS:
+        return official_name, ''
+    elif official_name in TACTICAL_BUYERS:
+        return '', official_name
     return '', ''
 
 # ─────────────────────────────────────────────────────────────
@@ -83,10 +119,10 @@ def load_pivot(file_path: str) -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
-def transform_data(df_pivot: pd.DataFrame) -> pd.DataFrame:
+def transform_data(df_pivot: pd.DataFrame) -> tuple:
     df_out = pd.DataFrame(columns=TARGET_HEADERS)
     
-    # 1. Mapeo directo
+    # Mapeo directo
     df_out['Contrato Sap'] = df_pivot.get('ID de contrato', pd.Series(dtype='object'))
     df_out['Estado Contrato Ariba'] = df_pivot.get('Estado del contrato', pd.Series(dtype='object'))
     df_out['Estado Contrato'] = df_out['Estado Contrato Ariba']
@@ -96,44 +132,42 @@ def transform_data(df_pivot: pd.DataFrame) -> pd.DataFrame:
     df_out['Descripción'] = df_pivot.get('Descripción', pd.Series(dtype='object'))
     df_out['Contratos Indefinidos'] = df_pivot.get('Es Indefinido', pd.Series(dtype='object'))
     
-    # 2. Fechas
+    # Fechas
     for src, tgt in [('Fecha de entrada en vigor - Fecha', 'Fecha Inicio'), ('Fecha de expiración - Fecha', 'Fecha Término Contrato')]:
         if src in df_pivot.columns: df_out[tgt] = pd.to_datetime(df_pivot[src], errors='coerce').dt.strftime('%d/%m/%Y')
         else: df_out[tgt] = ''
-    
-    # 3. Clasificación de compradores
+        
+    # 🔥 CLASIFICACIÓN ESTRICTA + FILTRADO
     raw_owners = df_pivot.get('Nombre del propietario', pd.Series(dtype='object')).fillna('').astype(str)
-    classified = raw_owners.apply(classify_buyer_robust)
+    classified = raw_owners.apply(classify_buyer_strict)
+    
     df_out['Comprador Estratégico'] = [x[0] for x in classified]
     df_out['Comprador Táctico'] = [x[1] for x in classified]
     
-    # 4. Regla: Nunca dejar sin encargado
-    mask_empty_both = (df_out['Comprador Estratégico'] == '') & (df_out['Comprador Táctico'] == '')
-    if mask_empty_both.any():
-        df_out.loc[mask_empty_both, 'Comprador Estratégico'] = raw_owners[mask_empty_both]
-        df_out.loc[mask_empty_both, 'Observación Interna'] = '⚠️ No está en lista oficial: ' + raw_owners[mask_empty_both].astype(str)
+    # 🗑️ ELIMINAR FILAS CON COMPRADORES NO OFICIALES
+    mask_valid_buyer = (df_out['Comprador Estratégico'] != '') | (df_out['Comprador Táctico'] != '')
+    dropped_invalid = (~mask_valid_buyer).sum()
+    df_out = df_out[mask_valid_buyer].reset_index(drop=True)
     
+    # 🚫 FILTRAR CONTRATOS CERRADOS
+    mask_no_cerrado = ~df_out['Estado Contrato Ariba'].astype(str).str.strip().str.lower().isin(['cerrado', 'cerrados'])
+    dropped_cerrados = (~mask_no_cerrado).sum()
+    df_out = df_out[mask_no_cerrado].reset_index(drop=True)
+    
+    # Si táctico está vacío pero estratégico tiene valor, copiar estratégico a táctico
     mask_tactical_empty = (df_out['Comprador Táctico'] == '') & (df_out['Comprador Estratégico'] != '')
     df_out.loc[mask_tactical_empty, 'Comprador Táctico'] = df_out.loc[mask_tactical_empty, 'Comprador Estratégico']
     
-    df_out['Administrador de Contrato'] = df_out['Comprador Estratégico'].where(df_out['Comprador Estratégico'] != '', df_out['Comprador Táctico'])
+    # Administrador y Correo
+    df_out['Administrador de Contrato'] = df_out['Comprador Estratégico']
     df_out['Correo Electrónico'] = ''
     
-    # 5. 🚫 FILTRAR CONTRATOS CERRADOS
-    status_col = 'Estado Contrato Ariba'
-    if status_col in df_out.columns:
-        # Elimina filas donde el estado sea "Cerrado" o "Cerrados" (ignora mayúsculas/minúsculas y espacios)
-        mask_no_cerrado = ~df_out[status_col].astype(str).str.strip().str.lower().isin(['cerrado', 'cerrados'])
-        removed_count = (~mask_no_cerrado).sum()
-        df_out = df_out[mask_no_cerrado].reset_index(drop=True)
-    else:
-        removed_count = 0
-
-    # 6. Limpieza final
+    # Limpieza final
     df_out = df_out.fillna('')
     df_out = df_out.replace(['null', 'None', 'Unclassified', 'nan'], '')
     
-    return df_out, removed_count
+    total_dropped = dropped_invalid + dropped_cerrados
+    return df_out, dropped_invalid, dropped_cerrados
 
 def apply_formatting(df: pd.DataFrame, output_path: str):
     wb = openpyxl.Workbook()
@@ -163,32 +197,32 @@ def apply_formatting(df: pd.DataFrame, output_path: str):
 # ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Generador Consolidado", layout="centered")
 st.title("📑 Generador de Consolidado de Contratos")
-st.caption("Sube el Pivot. Se filtrarán contratos **Cerrados** y se asignarán compradores sin espacios en blanco.")
+st.caption("Sube el Pivot. Se aplicará **filtro estricto de compradores oficiales** y se eliminarán contratos cerrados.")
 
 uploaded_file = st.file_uploader("📥 Archivo Pivot (.xlsx)", type=["xlsx"])
 
 if uploaded_file:
-    with st.spinner("Procesando, validando compradores y filtrando cerrados..."):
+    with st.spinner("Validando lista maestra, filtrando cerrados y limpiando datos..."):
         try:
             with tempfile.NamedTemporaryFile(delete=False, suffix="_pivot.xlsx") as tmp:
                 tmp.write(uploaded_file.getvalue()); pivot_path = tmp.name
             
             df_pivot = load_pivot(pivot_path)
-            df_final, removed_cerrados = transform_data(df_pivot)
+            df_final, dropped_invalid, dropped_cerrados = transform_data(df_pivot)
             
-            out_path = pivot_path.replace("_pivot.xlsx", "_Consolidado_Final.xlsx")
+            out_path = pivot_path.replace("_pivot.xlsx", "_Consolidado_Limpio.xlsx")
             apply_formatting(df_final, out_path)
             
             with open(out_path, "rb") as f:
                 st.download_button(
-                    label="📥 Descargar Consolidado",
+                    label="📥 Descargar Consolidado Limpio",
                     data=f,
                     file_name="Consolidado de Contratos.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
             
-            st.success(f"✅ **Archivo generado.**\n• **{removed_cerrados} contratos 'Cerrados' eliminados.**\n• {len(df_final)} contratos activos/proceso en el archivo.\n• Formato y compradores validados.")
+            st.success(f"✅ **Archivo generado y depurado.**\n• 🗑️ **{dropped_invalid} contratos eliminados** por compradores no oficiales.\n• 🚫 **{dropped_cerrados} contratos eliminados** por estado 'Cerrado'.\n• 📄 **{len(df_final)} contratos válidos** en el archivo final.\n• Formato 100% idéntico al original.")
             
             os.unlink(pivot_path); os.unlink(out_path)
         except Exception as e:
