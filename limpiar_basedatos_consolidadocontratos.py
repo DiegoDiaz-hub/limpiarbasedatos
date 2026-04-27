@@ -1,246 +1,191 @@
-"""
-pivot_to_consolidado.py
-========================
-Toma el archivo Pivot descargado desde SAP Ariba y genera desde cero un archivo
-llamado "Consolidado de trabajo.xlsx", replicando la estructura y formato
-de la hoja "Info Ariba" del Consolidado original.
- 
-Uso Streamlit:
-    streamlit run app.py
-"""
-
-import sys
-import os
-import tempfile
+import streamlit as st
 import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-import streamlit as st
-from pathlib import Path
+import tempfile
+import os
+import re
 
 # ─────────────────────────────────────────────────────────────
-# CONFIGURACIÓN DE COLUMNAS Y ESTILOS
+# 📋 LISTA OFICIAL DE COMPRADORES ESTRATÉGICOS
+# Actualiza esta lista si se incorporan nuevos compradores reales.
 # ─────────────────────────────────────────────────────────────
-
-# Estructura de columnas esperada (Info Ariba)
-INFO_ARIBA_HEADERS = [
-    None,                                               # col A – siempre vacía
-    'ID de contrato',
-    'Proyecto - Nombre del proyecto',
-    'Fecha de inicio',
-    'Nombre del propietario',
-    'Código acreedor SAP',
-    'Es Indefinido',
-    'Región - Región (L2)',
-    'Rut empresa proveedor',
-    'Partes afectadas - Proveedor común',
-    'Contrato - Contrato',
-    'Fecha de entrada en vigor - Fecha',
-    'Fecha de finalización - Año',
-    'Estado del contrato',
-    'Fecha de expiración - Fecha',
-    'Es un proyecto de prueba',
-    'Descripción',
-    'Aplica Garantía',
-    'Fecha de presentación Garantía N°1 - Fecha',
-    'Fecha de termino de notificaciones de garantía - Fecha',
-    'N° de Tipos de Garantías',
-    'Fecha de termino de notificaciones de garantía - Año',
-    'sum(Importe del contrato)',
-    'sum(Importe Monto Total Contrato Original)',
-    'sum(Importe Monto total Contrato)',
-    'Sample',
-]
-
-# Estilos
-STYLE_HEADER = {
-    'fill': PatternFill(start_color="FFE7E6E6", end_color="FFE7E6E6", fill_type="solid"),
-    'font': Font(name='Arial', size=8, bold=True),
-    'alignment': Alignment(horizontal='center', vertical='center', wrap_text=True),
-    'border': Border(
-        left=Side(style='thin'),
-        right=Side(style='thin'),
-        top=Side(style='thin'),
-        bottom=Side(style='thin')
-    )
+VALID_STRATEGIC_BUYERS = {
+    "jorge urrutia", "juan figueroa", "bárbara garcía", "claudio berrios",
+    "viviana grandón", "joseph españa", "patricio espinoza", "dayana dávila",
+    "michelle esperanza", "diego escalona", "magdalena farias", "leandro medina",
+    "judith rivas", "daniela escobar", "lina diaz", "victor camilla",
+    "laura mendoza", "sofia delgado", "priscilla gre guerra", "valeria silva",
+    "denisse andrea gonzalez terrile", "carol reyes", "servio salges cazorla",
+    "martina fuentes", "claudia castillo", "angela gallardo", "cecilia fernandez",
+    "denisse lopez", "felipe pavez correa"
 }
 
-STYLE_DATA = {
-    'font': Font(name='Arial', size=8),
-    'border': Border(
-        left=Side(style='thin'),
-        right=Side(style='thin'),
-        top=Side(style='thin'),
-        bottom=Side(style='thin')
-    )
+def is_valid_strategic_buyer(name: str) -> bool:
+    """Valida si el nombre pertenece a la lista oficial de compradores estratégicos."""
+    if pd.isna(name): return False
+    return str(name).strip().lower() in VALID_STRATEGIC_BUYERS
+
+# ─────────────────────────────────────────────────────────────
+# 🎨 ESTILOS DEL CONSOLIDADO
+# ─────────────────────────────────────────────────────────────
+STYLES = {
+    "header": {
+        "fill": PatternFill(start_color="FFE7E6E6", end_color="FFE7E6E6", fill_type="solid"),
+        "font": Font(name='Arial', size=8, bold=True),
+        "alignment": Alignment(horizontal='center', vertical='center', wrap_text=True),
+        "border": Border(left=Side('thin'), right=Side('thin'), top=Side('thin'), bottom=Side('thin'))
+    },
+    "data": {
+        "font": Font(name='Arial', size=8),
+        "border": Border(left=Side('thin'), right=Side('thin'), top=Side('thin'), bottom=Side('thin')),
+        "alignment": Alignment(horizontal='left', vertical='center')
+    }
 }
 
-
-def find_header_row(xl_path: Path) -> int:
-    """Encuentra la fila (0-indexed para pandas) donde está 'ID de contrato'."""
-    df = pd.read_excel(xl_path, sheet_name='Data', header=None, nrows=30, engine='openpyxl')
-    for i, row in df.iterrows():
-        # Busca en toda la fila por si hay espacios o variaciones
-        if any('ID de contrato' in str(val) for val in row if pd.notna(val)):
-            return i
-    raise ValueError("No se encontró la fila de encabezados 'ID de contrato' en la hoja Data.")
-
-
-def read_and_clean_pivot(pivot_path: Path) -> pd.DataFrame:
-    """Lee el Pivot, limpia datos y reordena columnas."""
-    header_idx = find_header_row(pivot_path)
-    
-    # Leemos el archivo usando la fila de encabezado encontrada
-    df = pd.read_excel(pivot_path, sheet_name='Data', header=header_idx, engine='openpyxl')
-    
-    # Eliminamos filas y columnas completamente vacías
+# ─────────────────────────────────────────────────────────────
+# 🔄 PROCESAMIENTO PRINCIPAL
+# ─────────────────────────────────────────────────────────────
+def process_pivot(pivot_df: pd.DataFrame) -> pd.DataFrame:
+    """Limpia, valida compradores y mapea columnas al formato Consolidado."""
+    # 1. Limpieza básica
+    df = pivot_df.copy()
     df = df.dropna(how='all').dropna(axis=1, how='all')
     
-    # Normalizamos los nombres de las columnas para asegurar el match
-    # A veces Ariba pone espacios extra
-    df.columns = [col.strip() if isinstance(col, str) else col for col in df.columns]
+    # Normalizar nombres de columnas
+    df.columns = [col.strip() for col in df.columns]
     
-    # Reordenamos columnas para que coincidan con INFO_ARIBA_HEADERS
-    # Las columnas que no están en la lista se ignoran, las que faltan se dejan vacías
-    final_columns = [col for col in INFO_ARIBA_HEADERS if col is not None]
-    df_final = pd.DataFrame()
+    # 2. Mapeo al formato Consolidado
+    consolidado_cols = [
+        'Contrato Sap', 'Contrato Legado', 'Comprador Estratégico', 'Comprador Táctico',
+        'Estado Contrato Ariba', 'Rut', 'Cód SAP', 'Proveedor', 'Fecha Inicio',
+        'Fecha Término Contrato', 'Estado Contrato', 'Descripción', 'Área', 'Gerencia',
+        'Planta', 'Ingresa a Planta', 'Aplica Boleta de Garantía (Ariba)',
+        'Aplica Boleta de Garantía (Contrato firmado)', 'Tipo Garantía', 'N° Garantia',
+        'Moneda Garantía', 'Monto Garantía', 'Vencimiento Garantía', 'Estado Garantía',
+        'Administrador de Contrato', 'Correo Electrónico',
+        'Observación contrato Control Contratista',
+        'Observación Control Contratistas Boleta de Garantía',
+        'Contratos Indefinidos', 'Observación Interna'
+    ]
     
-    # Aseguramos que la columna vacía (A) exista
-    df_final[None] = None 
+    res = pd.DataFrame(columns=consolidado_cols)
     
-    for col_name in final_columns:
-        if col_name in df.columns:
-            df_final[col_name] = df[col_name]
+    # Mapeo directo
+    res['Contrato Sap'] = df.get('ID de contrato', pd.Series(dtype='object'))
+    res['Estado Contrato Ariba'] = df.get('Estado del contrato', pd.Series(dtype='object'))
+    res['Rut'] = df.get('Rut empresa proveedor', pd.Series(dtype='object'))
+    res['Cód SAP'] = df.get('Código acreedor SAP', pd.Series(dtype='object'))
+    res['Proveedor'] = df.get('Partes afectadas - Proveedor común', pd.Series(dtype='object'))
+    res['Descripción'] = df.get('Descripción', pd.Series(dtype='object'))
+    res['Contratos Indefinidos'] = df.get('Es Indefinido', pd.Series(dtype='object'))
+    
+    # Fechas (formateo básico)
+    for col_in, col_out in [('Fecha de entrada en vigor - Fecha', 'Fecha Inicio'), 
+                            ('Fecha de expiración - Fecha', 'Fecha Término Contrato')]:
+        if col_in in df.columns:
+            res[col_out] = pd.to_datetime(df[col_in], errors='coerce').dt.strftime('%d/%m/%Y')
         else:
-            df_final[col_name] = None # Columna vacía si falta en el pivot
+            res[col_out] = pd.Series(dtype='object')
+            
+    # 🛡️ VALIDACIÓN DE COMPRADOR ESTRATÉGICO
+    owners = df.get('Nombre del propietario', pd.Series(dtype='object'))
+    valid_buyers = owners.apply(is_valid_strategic_buyer)
+    
+    res['Comprador Estratégico'] = owners.where(valid_buyers, None)
+    
+    # Si no es estratégico, dejar rastro en observación para auditoría
+    res['Observación Interna'] = res['Observación Interna'].astype(str) + " | " + owners[~valid_buyers].fillna("N/A")
+    res.loc[res['Observación Interna'].str.len() < 4, 'Observación Interna'] = None
+    
+    # Estados y garantías
+    res['Aplica Boleta de Garantía (Ariba)'] = df.get('Aplica Garantía', pd.Series(dtype='object'))
+    res['Administrador de Contrato'] = owners  # Propietario Ariba va como Administrador
+    
+    # Limpiar NaN/NaT finales
+    res = res.fillna('')
+    return res
 
-    return df_final
-
-
-def create_consolidado_workbook(df: pd.DataFrame) -> str:
-    """Crea un archivo Excel nuevo con formato de Consolidado."""
+def create_excel_output(df: pd.DataFrame, output_path: str):
+    """Escribe el DataFrame en Excel con el formato exacto del Consolidado."""
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "Info Ariba"
-
-    # 1. Escribir Encabezados
-    for col_idx, header in enumerate(INFO_ARIBA_HEADERS, start=1):
-        cell = ws.cell(row=1, column=col_idx)
-        cell.value = header
-        cell.fill = STYLE_HEADER['fill']
-        cell.font = STYLE_HEADER['font']
-        cell.alignment = STYLE_HEADER['alignment']
-        cell.border = STYLE_HEADER['border']
-
-    # Altura de la fila de encabezado para que se vea el texto
-    ws.row_dimensions[1].height = 45
-
-    # 2. Escribir Datos
-    # pivot_cols son los nombres de las columnas (excluyendo None)
-    pivot_cols = [h for h in INFO_ARIBA_HEADERS if h is not None]
-
-    for r_idx, (_, row_data) in enumerate(df.iterrows(), start=2):
-        # Columna A (vacía)
-        ws.cell(row=r_idx, column=1).value = None
-        ws.cell(row=r_idx, column=1).border = STYLE_DATA['border']
-        
-        # Resto de columnas
-        for c_idx, col_name in enumerate(pivot_cols, start=2):
-            val = row_data.get(col_name, None)
-            
-            # Limpieza de NaN / NaT
-            if pd.isna(val):
-                val = None
-            
-            cell = ws.cell(row=r_idx, column=c_idx)
-            cell.value = val
-            cell.font = STYLE_DATA['font']
-            cell.border = STYLE_DATA['border']
-            # Centramos texto numérico y fechas, alineamos a la izquierda texto largo
-            if isinstance(val, (int, float)):
+    ws.title = "Consolidado de Contratos"
+    
+    # Headers
+    for col_idx, header in enumerate(df.columns, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        for k, v in STYLES["header"].items():
+            setattr(cell, k, v)
+    ws.row_dimensions[1].height = 40
+    
+    # Data
+    for row_idx, row in df.iterrows():
+        for col_idx, value in enumerate(row, start=1):
+            cell = ws.cell(row=row_idx + 1, column=col_idx, value=value)
+            cell.font = STYLES["data"]["font"]
+            cell.border = STYLES["data"]["border"]
+            if isinstance(value, (int, float)):
                 cell.alignment = Alignment(horizontal='center', vertical='center')
-            elif isinstance(val, pd.Timestamp):
-                cell.alignment = Alignment(horizontal='center', vertical='center')
-                cell.number_format = 'DD/MM/YYYY'
-
-    # 3. Filtros y Paneles
-    max_row = ws.max_row
-    max_col = ws.max_column
-    
-    # AutoFilter en toda la tabla
-    ws.auto_filter.ref = f"A1:{get_column_letter(max_col)}{max_row}"
-    
-    # Inmovilizar paneles (similar a 'E3' en el original, ajustado a la estructura)
-    ws.freeze_panes = "B2"
-
-    # 4. Ajustar ancho de columnas (Opcional, pero ayuda a que se vea bien)
-    for column_cells in ws.columns:
-        max_length = 0
-        column = column_cells[0].column_letter
-        for cell in column_cells:
-            try:
-                if cell.value:
-                    max_length = max(max_length, len(str(cell.value)))
-            except:
-                pass
-        adjusted_width = min(max_length + 2, 40) # Tope de 40
-        ws.column_dimensions[column].width = adjusted_width
-
-    # Guardar temporalmente para retornar la ruta
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx", prefix="Consolidado_Trabajo_") as tmp_file:
-        wb.save(tmp_file.name)
-        return tmp_file.name
-
-
-# ─────────────────────────────────────────────────────────────
-# INTERFAZ STREAMLIT
-# ─────────────────────────────────────────────────────────────
-
-st.set_page_config(page_title="Generador Consolidado Ariba", layout="centered")
-st.title("📑 Generador de Consolidado de Trabajo")
-st.caption("Sube el archivo Pivot de Ariba y descarga el archivo formateado.")
-
-uploaded_file = st.file_uploader("Selecciona el archivo Pivot (.xlsx)", type=["xlsx"])
-
-if uploaded_file:
-    st.divider()
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.info(f"Archivo cargado: **{uploaded_file.name}**")
-    
-    with col2:
-        process_btn = st.button("🚀 Generar Archivo", type="primary", use_container_width=True)
-
-    if process_btn:
-        try:
-            with st.spinner("Procesando datos y aplicando formato..."):
-                # 1. Guardar upload temporal
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_in:
-                    tmp_in.write(uploaded_file.getvalue())
-                    pivot_path = Path(tmp_in.name)
-
-                # 2. Leer y limpiar
-                df_clean = read_and_clean_pivot(pivot_path)
-                st.success(f"✅ Se encontraron {len(df_clean)} registros válidos.")
-
-                # 3. Generar archivo final
-                output_path = create_consolidado_workbook(df_clean)
-
-                # 4. Descargar
-                with open(output_path, "rb") as f:
-                    st.download_button(
-                        label="📥 Descargar Consolidado de trabajo.xlsx",
-                        data=f,
-                        file_name="Consolidado de trabajo.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                cell.number_format = '#,##0.00' if value > 100 else 'General'
                 
-                # Limpieza de temporales
-                os.unlink(pivot_path)
-                os.unlink(output_path)
+    # Filtros y paneles
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(df.columns))}{len(df) + 1}"
+    ws.freeze_panes = "C2"
+    
+    # Anchos automáticos (limitados)
+    for col_cells in ws.columns:
+        max_len = max((len(str(cell.value)) for cell in col_cells), default=10)
+        ws.column_dimensions[get_column_letter(col_cells[0].column)].width = min(max_len + 2, 35)
+        
+    wb.save(output_path)
 
+# ─────────────────────────────────────────────────────────────
+# 🌐 INTERFAZ STREAMLIT
+# ─────────────────────────────────────────────────────────────
+st.set_page_config(page_title="Consolidador Ariba → Trabajo", layout="centered")
+st.title("📊 Generador de Consolidado de Trabajo")
+st.caption("Sube solo el Pivot de Ariba. El sistema validará compradores estratégicos y aplicará el formato oficial.")
+
+uploaded = st.file_uploader("📂 Archivo Pivot (.xlsx)", type=["xlsx"])
+
+if uploaded:
+    with st.spinner("Procesando y validando compradores estratégicos..."):
+        try:
+            # Leer Pivot
+            pivot_df = pd.read_excel(uploaded, sheet_name='Data', header=None, nrows=50, engine='openpyxl')
+            # Detectar fila de headers dinámicamente
+            header_idx = 0
+            for i, row in pivot_df.iterrows():
+                if any('ID de contrato' in str(v) for v in row if pd.notna(v)):
+                    header_idx = i
+                    break
+                    
+            pivot_df = pd.read_excel(uploaded, sheet_name='Data', header=header_idx, engine='openpyxl')
+            pivot_df = pivot_df.dropna(how='all').dropna(axis=1, how='all')
+            
+            # Validar y mapear
+            final_df = process_pivot(pivot_df)
+            
+            # Guardar temporal
+            with tempfile.NamedTemporaryFile(delete=False, suffix="_Consolidado_Trabajo.xlsx") as tmp:
+                create_excel_output(final_df, tmp.name)
+                tmp_path = tmp.name
+                
+            st.success(f"✅ Procesado {len(final_df)} contratos. Compradores estratégicos validados correctamente.")
+            
+            # Botón descarga
+            with open(tmp_path, "rb") as f:
+                st.download_button(
+                    label="📥 Descargar Consolidado de trabajo.xlsx",
+                    data=f,
+                    file_name="Consolidado de trabajo.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+                
+            # Limpieza
+            os.unlink(tmp_path)
+            
         except Exception as e:
-            st.error(f"❌ Ocurrió un error: {str(e)}")
-            st.exception(e)
+            st.error(f"❌ Error: {str(e)}")
