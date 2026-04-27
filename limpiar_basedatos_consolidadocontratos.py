@@ -5,9 +5,97 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 import tempfile
 import os
+import warnings
+
+warnings.filterwarnings('ignore')
 
 # ─────────────────────────────────────────────────────────────
-# 📐 ESTRUCTURA EXACTA DEL CONSOLIDADO OBJETIVO
+# ✅ LISTA OFICIAL DE COMPRADORES (EXTRACTADA DE TU DATA)
+# ─────────────────────────────────────────────────────────────
+VALID_STRATEGIC_BUYERS = {
+    'Jorge Urrutia',
+    'Jorge Alfonso Urrutia Carillo',
+    'Bárbara García',
+    'Patricio Espinoza',
+    'Joseph España',
+    'Viviana Grandón',
+    'Claudio Berrios',
+    'Magdalena Farias',
+    'Martina Fuentes',
+    'Denisse Andrea Gonzalez Terrile',
+    'BPO',
+    'Juan Daniel Figueroa',
+    'Juan Figueroa',
+    'Laura Mendoza',
+    'Diego Escalona',
+    'Judith Rivas',
+    'Dayana Dávila',
+    'Daniela Escobar',
+    'Leandro Medina',
+    'Sofia Delgado',
+    'Lina Diaz',
+    'Michelle Esperanza',
+    'Carol Reyes',
+    'Claudia Castillo',
+    'Cecilia Fernandez',
+    'Servio Salges Cazorla',
+    'Priscilla Gre Guerra',
+    'Angela Gallardo'
+}
+
+VALID_TACTICAL_BUYERS = {
+    'Leonardo Nacarate',
+    'Patricio Espinoza',
+    'Joseph España',
+    'Dayana Dávila',
+    'BPO'
+}
+
+def normalize_name(name):
+    """Normaliza el nombre eliminando espacios extras y estandarizando."""
+    if pd.isna(name) or str(name).strip() == '':
+        return ''
+    return str(name).strip()
+
+def validate_and_assign_buyers(df_pivot: pd.DataFrame) -> tuple:
+    """
+    Valida y asigna compradores estratégicos y tácticos SOLO si están en la lista oficial.
+    Retorna dos Series: strategic_buyers, tactical_buyers
+    """
+    strategic = []
+    tactical = []
+    
+    # Obtener columna del propietario (comprador en Ariba)
+    owner_col = 'Nombre del propietario' if 'Nombre del propietario' in df_pivot.columns else None
+    
+    for idx, row in df_pivot.iterrows():
+        raw_name = normalize_name(row.get(owner_col, '') if owner_col else '')
+        
+        # Limpiar variaciones comunes del nombre
+        clean_name = raw_name.replace('  ', ' ').title()
+        
+        # Buscar match exacto o parcial en lista estratégica
+        matched_strategic = None
+        for valid_name in VALID_STRATEGIC_BUYERS:
+            if clean_name.lower() == valid_name.lower() or clean_name in valid_name or valid_name in clean_name:
+                matched_strategic = valid_name
+                break
+        
+        # Si no hay match estratégico, buscar en tácticos
+        matched_tactical = None
+        if not matched_strategic:
+            for valid_name in VALID_TACTICAL_BUYERS:
+                if clean_name.lower() == valid_name.lower() or clean_name in valid_name or valid_name in clean_name:
+                    matched_tactical = valid_name
+                    break
+        
+        strategic.append(matched_strategic if matched_strategic else '')
+        tactical.append(matched_tactical if matched_tactical else '')
+    
+    return pd.Series(strategic), pd.Series(tactical)
+
+# ─────────────────────────────────────────────────────────────
+# 📐 ESTRUCTURA EXACTA DEL CONSOLIDADO OBJETIVO (30 Columnas)
 # ─────────────────────────────────────────────────────────────
 TARGET_HEADERS = [
     'Contrato Sap', 'Contrato Legado', 'Comprador Estratégico', 'Comprador Táctico',
@@ -20,174 +108,168 @@ TARGET_HEADERS = [
     'Observación Control Contratistas Boleta de Garantía', 'Contratos Indefinidos', 'Observación Interna'
 ]
 
-# 🔄 Mapeo Pivot Ariba → Columnas del Consolidado
-PIVOT_MAPPING = {
-    'ID de contrato': 'Contrato Sap',
-    'Nombre del propietario': 'Comprador Estratégico',
-    'Estado del contrato': 'Estado Contrato Ariba',
-    'Rut empresa proveedor': 'Rut',
-    'Código acreedor SAP': 'Cód SAP',
-    'Partes afectadas - Proveedor común': 'Proveedor',
-    'Fecha de entrada en vigor - Fecha': 'Fecha Inicio',
-    'Fecha de expiración - Fecha': 'Fecha Término Contrato',
-    'Descripción': 'Descripción',
-    'Aplica Garantía': 'Aplica Boleta de Garantía (Ariba)',
-    'Es Indefinido': 'Contratos Indefinidos'
+# ─────────────────────────────────────────────────────────────
+# 🎨 ESTILOS IDÉNTICOS AL CONSOLIDADO DE REFERENCIA
+# ─────────────────────────────────────────────────────────────
+STYLES = {
+    "header": {
+        "fill": PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_type="solid"),
+        "font": Font(name='Arial', size=8, bold=True),
+        "alignment": Alignment(horizontal='center', vertical='center', wrap_text=True),
+        "border": Border(left=Side('thin'), right=Side('thin'), top=Side('thin'), bottom=Side('thin'))
+    },
+    "data": {
+        "font": Font(name='Arial', size=8),
+        "border": Border(left=Side('thin'), right=Side('thin'), top=Side('thin'), bottom=Side('thin')),
+        "alignment": Alignment(horizontal='left', vertical='center', wrap_text=False)
+    }
 }
 
-def read_pivot_safely(file_path):
-    """Lee el Pivot detectando automáticamente la fila de encabezados."""
-    df_scan = pd.read_excel(file_path, sheet_name='Data', header=None, nrows=50)
+COLUMN_WIDTHS = [14, 16, 20, 16, 20, 16, 12, 38, 14, 18, 16, 45, 16, 16, 12, 14, 26, 32, 14, 14, 14, 16, 16, 14, 20, 22, 35, 45, 18, 45]
+
+def load_pivot(file_path: str) -> pd.DataFrame:
+    """Lee el Pivot detectando automáticamente la fila de encabezados reales."""
+    try:
+        df_scan = pd.read_excel(file_path, sheet_name='Data', header=None, nrows=50)
+    except Exception:
+        df_scan = pd.read_excel(file_path, header=None, nrows=50)
+        
     header_row = None
     for i, row in df_scan.iterrows():
         if any('ID de contrato' in str(v) for v in row if pd.notna(v)):
             header_row = i
             break
+            
     if header_row is None:
         raise ValueError("No se encontró la fila de encabezados ('ID de contrato') en la hoja Data.")
         
-    df = pd.read_excel(file_path, sheet_name='Data', header=header_row, engine='openpyxl')
+    df = pd.read_excel(file_path, sheet_name='Data' if 'Data' in pd.ExcelFile(file_path).sheet_names else 0, header=header_row)
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
-def generate_identical_consolidado(pivot_path, output_path):
-    """Genera un Excel idéntico en estructura y formato al Consolidado de Contratos."""
-    df_pivot = read_pivot_safely(pivot_path)
-    
-    # Crear DataFrame con estructura vacía exacta
+def transform_data(df_pivot: pd.DataFrame) -> pd.DataFrame:
+    """Mapea, limpia y aplica la lógica crítica de compradores SIN ESPACIOS EN BLANCO."""
     df_out = pd.DataFrame(columns=TARGET_HEADERS)
     
-    # Mapear datos
-    for p_col, t_col in PIVOT_MAPPING.items():
-        if p_col in df_pivot.columns and t_col in df_out.columns:
-            df_out[t_col] = df_pivot[p_col].copy()
-            
-    # Duplicar estado en la columna objetivo
-    if 'Estado Contrato Ariba' in df_out.columns and 'Estado Contrato' in df_out.columns:
-        df_out['Estado Contrato'] = df_out['Estado Contrato Ariba'].copy()
+    # 1. Mapeo directo de columnas existentes en el Pivot
+    df_out['Contrato Sap'] = df_pivot.get('ID de contrato', pd.Series(dtype='object'))
+    df_out['Estado Contrato Ariba'] = df_pivot.get('Estado del contrato', pd.Series(dtype='object'))
+    df_out['Estado Contrato'] = df_out['Estado Contrato Ariba']
+    df_out['Rut'] = df_pivot.get('Rut empresa proveedor', pd.Series(dtype='object'))
+    df_out['Cód SAP'] = df_pivot.get('Código acreedor SAP', pd.Series(dtype='object'))
+    df_out['Proveedor'] = df_pivot.get('Partes afectadas - Proveedor común', pd.Series(dtype='object'))
+    df_out['Descripción'] = df_pivot.get('Descripción', pd.Series(dtype='object'))
+    df_out['Contratos Indefinidos'] = df_pivot.get('Es Indefinido', pd.Series(dtype='object'))
     
-    # ─────────────────────────────────────────────────────────────
-    # 🔥 VALIDACIÓN: NUNCA DEJAR COMPRADORES EN BLANCO
-    # ─────────────────────────────────────────────────────────────
-    
-    # 1. Si hay "Nombre del propietario", asignar a Comprador Estratégico
-    if 'Nombre del propietario' in df_pivot.columns:
-        df_out['Comprador Estratégico'] = df_pivot['Nombre del propietario'].fillna('').astype(str)
-        df_out.loc[df_out['Comprador Estratégico'] == '', 'Comprador Estratégico'] = 'Sin Asignar'
-        df_out.loc[df_out['Comprador Estratégico'].str.lower() == 'nan', 'Comprador Estratégico'] = 'Sin Asignar'
-    
-    # 2. Si hay "Partes afectadas - Proveedor común" y no hay Comprador Táctico, 
-    #    intentar extraer información o dejar "Por Definir"
-    if 'Comprador Táctico' in df_out.columns:
-        df_out['Comprador Táctico'] = df_out['Comprador Táctico'].fillna('').astype(str)
-        df_out.loc[df_out['Comprador Táctico'] == '', 'Comprador Táctico'] = 'Por Definir'
-        df_out.loc[df_out['Comprador Táctico'].str.lower() == 'nan', 'Comprador Táctico'] = 'Por Definir'
-    
-    # 3. Asegurar que Administrador de Contrato tenga valor
-    if 'Administrador de Contrato' in df_out.columns:
-        if 'Nombre del propietario' in df_pivot.columns:
-            df_out['Administrador de Contrato'] = df_pivot['Nombre del propietario'].fillna('').astype(str)
-            df_out.loc[df_out['Administrador de Contrato'] == '', 'Administrador de Contrato'] = 'Sin Asignar'
-            df_out.loc[df_out['Administrador de Contrato'].str.lower() == 'nan', 'Administrador de Contrato'] = 'Sin Asignar'
+    # 2. Formateo de fechas
+    for src, tgt in [('Fecha de entrada en vigor - Fecha', 'Fecha Inicio'), 
+                     ('Fecha de expiración - Fecha', 'Fecha Término Contrato')]:
+        if src in df_pivot.columns:
+            df_out[tgt] = pd.to_datetime(df_pivot[src], errors='coerce').dt.strftime('%d/%m/%Y')
         else:
-            df_out['Administrador de Contrato'] = 'Sin Asignar'
+            df_out[tgt] = ''
     
-    # 4. Si hay correo en el pivot, mapearlo
-    if 'Correo Electrónico' in df_out.columns:
-        df_out['Correo Electrónico'] = ''  # Por defecto vacío si no hay datos
+    # 3. 🔥 VALIDACIÓN ESTRICTA DE COMPRADORES (SOLO NOMBRES OFICIALES)
+    strategic_series, tactical_series = validate_and_assign_buyers(df_pivot)
     
-    # Limpieza general
-    df_out = df_out.replace(['null', 'None', 'Unclassified', 'nan', 'NaN'], '')
+    df_out['Comprador Estratégico'] = strategic_series
+    df_out['Comprador Táctico'] = tactical_series
+    
+    # 🛡️ REGLA DE ORO: NUNCA DEJAR COMPRADORES EN BLANCO
+    # Si el táctico está vacío, copiamos el estratégico
+    mask_tactical_empty = (df_out['Comprador Táctico'] == '') | (df_out['Comprador Táctico'].isna())
+    df_out.loc[mask_tactical_empty, 'Comprador Táctico'] = df_out.loc[mask_tactical_empty, 'Comprador Estratégico']
+    
+    # Si el estratégico está vacío, copiamos el táctico
+    mask_strategic_empty = (df_out['Comprador Estratégico'] == '') | (df_out['Comprador Estratégico'].isna())
+    df_out.loc[mask_strategic_empty, 'Comprador Estratégico'] = df_out.loc[mask_strategic_empty, 'Comprador Táctico']
+    
+    # Safety net final: si ambos están vacíos, asignar "Sin Asignar"
+    df_out.loc[(df_out['Comprador Estratégico'] == '') & (df_out['Comprador Táctico'] == ''), 'Comprador Estratégico'] = 'Sin Asignar'
+    df_out.loc[(df_out['Comprador Estratégico'] == '') & (df_out['Comprador Táctico'] == ''), 'Comprador Táctico'] = 'Sin Asignar'
+    
+    # 4. Administrador y Correo
+    df_out['Administrador de Contrato'] = df_out['Comprador Estratégico']
+    df_out['Correo Electrónico'] = ''
+    
+    # 5. Limpieza general
     df_out = df_out.fillna('')
+    df_out = df_out.replace(['null', 'None', 'Unclassified', 'nan'], '')
     
-    # Formatear fechas
-    for date_col in ['Fecha Inicio', 'Fecha Término Contrato']:
-        if date_col in df_out.columns:
-            df_out[date_col] = pd.to_datetime(df_out[date_col], errors='coerce').dt.strftime('%d/%m/%Y')
-            df_out.loc[df_out[date_col] == 'NaT', date_col] = ''
+    return df_out
 
-    # ─────────────────────────────────────────────────────────────
-    # 🎨 ESCRITURA EXCEL CON FORMATO IDÉNTICO
-    # ─────────────────────────────────────────────────────────────
+def apply_formatting(df: pd.DataFrame, output_path: str):
+    """Escribe el DataFrame aplicando el formato pixel-perfect del Consolidado."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Consolidado de Contratos"
     
-    # Estilos
-    hdr_fill = PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_type="solid")
-    hdr_font = Font(name='Arial', size=8, bold=True)
-    hdr_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    thin_border = Border(left=Side('thin'), right=Side('thin'), top=Side('thin'), bottom=Side('thin'))
-    data_font = Font(name='Arial', size=8)
-    data_align = Alignment(horizontal='left', vertical='center', wrap_text=False)
-    
-    # Escribir encabezados
+    # Encabezados
     for col_idx, header in enumerate(TARGET_HEADERS, start=1):
         cell = ws.cell(row=1, column=col_idx, value=header)
-        cell.fill = hdr_fill
-        cell.font = hdr_font
-        cell.alignment = hdr_align
-        cell.border = thin_border
+        cell.fill = STYLES["header"]["fill"]
+        cell.font = STYLES["header"]["font"]
+        cell.alignment = STYLES["header"]["alignment"]
+        cell.border = STYLES["header"]["border"]
     ws.row_dimensions[1].height = 45
     
-    # Escribir datos
-    for r_idx, row in df_out.iterrows():
+    # Datos
+    for r_idx, row in df.iterrows():
         for c_idx, val in enumerate(row, start=1):
             cell = ws.cell(row=r_idx + 2, column=c_idx, value=val)
-            cell.font = data_font
-            cell.border = thin_border
-            cell.alignment = data_align
+            cell.font = STYLES["data"]["font"]
+            cell.border = STYLES["data"]["border"]
+            cell.alignment = STYLES["data"]["alignment"]
             
-            # Ajuste especial para fechas y montos
-            if c_idx in [9, 10]:  # Columnas Fecha
+            if c_idx in [9, 10]:
                 cell.alignment = Alignment(horizontal='center', vertical='center')
-            if isinstance(val, (int, float)):
+            elif isinstance(val, (int, float)):
                 cell.alignment = Alignment(horizontal='center', vertical='center')
                 cell.number_format = '#,##0.00'
-
-    # Anchos de columna (ajustados para igualar visualmente tu archivo)
-    widths = [14, 16, 20, 16, 20, 16, 12, 38, 14, 18, 16, 45, 16, 16, 12, 14, 26, 32, 14, 14, 14, 16, 16, 14, 20, 22, 35, 45, 18, 45]
-    for i, w in enumerate(widths, 1):
+                
+    # Anchos de columna
+    for i, w in enumerate(COLUMN_WIDTHS, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
         
-    # Autoajuste de filtros y paneles
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(TARGET_HEADERS))}{len(df_out) + 1}"
+    # Filtros y paneles
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(TARGET_HEADERS))}{len(df) + 1}"
     ws.freeze_panes = "C2"
     
     wb.save(output_path)
-    return output_path
 
 # ─────────────────────────────────────────────────────────────
 # 🌐 INTERFAZ STREAMLIT
 # ─────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Generador Consolidado", layout="centered")
+st.set_page_config(page_title="Generador Consolidado Ariba", layout="centered")
 st.title("📑 Generador de Consolidado de Contratos")
-st.caption("Sube el Pivot de Ariba y descarga el Consolidado de Contratos con formato exacto.")
+st.caption("Sube el Pivot crudo. El sistema validará compradores contra la lista oficial y nunca dejará espacios en blanco.")
 
 uploaded_file = st.file_uploader("📥 Selecciona el archivo Pivot (.xlsx)", type=["xlsx"])
 
 if uploaded_file:
-    with st.spinner("Procesando y aplicando formato idéntico..."):
+    with st.spinner("Validando compradores oficiales y aplicando formato..."):
         try:
-            # Guardar temporalmente
             with tempfile.NamedTemporaryFile(delete=False, suffix="_pivot.xlsx") as tmp:
                 tmp.write(uploaded_file.getvalue())
                 pivot_path = tmp.name
                 
-            out_path = pivot_path.replace("_pivot.xlsx", "_Consolidado_Identico.xlsx")
-            generate_identical_consolidado(pivot_path, out_path)
+            df_pivot = load_pivot(pivot_path)
+            df_final = transform_data(df_pivot)
             
-            # Descargar
+            out_path = pivot_path.replace("_pivot.xlsx", "_Consolidado_Final.xlsx")
+            apply_formatting(df_final, out_path)
+            
             with open(out_path, "rb") as f:
                 st.download_button(
-                    label="📥 Descargar Consolidado (Formato Idéntico)",
+                    label="📥 Descargar Consolidado de Contratos",
                     data=f,
                     file_name="Consolidado de Contratos.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
                 )
-            st.success("✅ Archivo generado con éxito. **Sin celdas en blanco** en compradores.")
+                
+            st.success("✅ **Archivo generado correctamente.**\n• **Solo nombres oficiales** de compradores.\n• **0 espacios en blanco** en compradores estratégicos/tácticos.\n• Formato idéntico al original.")
             
-            # Limpieza
             os.unlink(pivot_path)
             os.unlink(out_path)
             
