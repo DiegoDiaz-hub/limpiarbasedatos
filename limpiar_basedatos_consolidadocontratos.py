@@ -21,7 +21,7 @@ TARGET_HEADERS = [
 ]
 
 # 🔄 Mapeo Pivot Ariba → Columnas del Consolidado
-# (Agrega o modifica según tu necesidad real de datos)
+# Se corrigió la duplicidad de 'Nombre del propietario'
 PIVOT_MAPPING = {
     'ID de contrato': 'Contrato Sap',
     'Nombre del propietario': 'Comprador Estratégico',
@@ -33,7 +33,6 @@ PIVOT_MAPPING = {
     'Fecha de expiración - Fecha': 'Fecha Término Contrato',
     'Descripción': 'Descripción',
     'Aplica Garantía': 'Aplica Boleta de Garantía (Ariba)',
-    'Nombre del propietario': 'Administrador de Contrato',
     'Es Indefinido': 'Contratos Indefinidos'
 }
 
@@ -59,10 +58,15 @@ def generate_identical_consolidado(pivot_path, output_path):
     # Crear DataFrame con estructura vacía exacta
     df_out = pd.DataFrame(columns=TARGET_HEADERS)
     
-    # Mapear datos
+    # Mapear datos según configuración
     for p_col, t_col in PIVOT_MAPPING.items():
         if p_col in df_pivot.columns and t_col in df_out.columns:
             df_out[t_col] = df_pivot[p_col].copy()
+            
+    # Mapear Propietario también a Administrador de Contrato
+    # (Suelen ser la misma persona en Ariba)
+    if 'Nombre del propietario' in df_pivot.columns and 'Administrador de Contrato' in df_out.columns:
+        df_out['Administrador de Contrato'] = df_pivot['Nombre del propietario'].copy()
             
     # Duplicar estado en la columna objetivo
     if 'Estado Contrato Ariba' in df_out.columns and 'Estado Contrato' in df_out.columns:
@@ -134,7 +138,7 @@ def generate_identical_consolidado(pivot_path, output_path):
 # ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Generador Consolidado", layout="centered")
 st.title("📑 Generador de Consolidado de Contratos")
-st.caption("Sube el Pivot de Ariba y descarga el Consolidado de Contratos.")
+st.caption("Sube el Pivot de Ariba y descarga el Consolidado de Contratos con los compradores correctos.")
 
 uploaded_file = st.file_uploader("📥 Selecciona el archivo Pivot (.xlsx)", type=["xlsx"])
 
@@ -157,7 +161,7 @@ if uploaded_file:
                     file_name="Consolidado de Contratos.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-            st.success("✅ Archivo generado con éxito. El formato, columnas y estilos son idénticos al original.")
+            st.success("✅ Archivo generado con éxito. Los nombres de los compradores se han cargado correctamente.")
             
             # Limpieza
             os.unlink(pivot_path)
