@@ -1,31 +1,29 @@
 """
 pivot_to_consolidado.py
 ========================
-Toma el archivo Pivot descargado desde SAP Ariba y lo integra al
-Consolidado de Contratos, actualizando la hoja "Info Ariba" con los
-nuevos datos, manteniendo intactas las hojas BG, Antiguo y las fórmulas
-del Consolidado principal.
+Toma el archivo Pivot descargado desde SAP Ariba y genera desde cero un archivo
+llamado "Consolidado de trabajo.xlsx", replicando la estructura y formato
+de la hoja "Info Ariba" del Consolidado original.
  
-Uso:
-    python pivot_to_consolidado.py <pivot.xlsx> <consolidado.xlsx> [salida.xlsx]
- 
-Si no se indica salida, sobreescribe el consolidado.
+Uso Streamlit:
+    streamlit run app.py
 """
- 
+
 import sys
-import shutil
+import os
 import tempfile
-from pathlib import Path
 import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 import streamlit as st
- 
+from pathlib import Path
+
 # ─────────────────────────────────────────────────────────────
-# COLUMNAS ESPERADAS EN Info Ariba (igual que en el Pivot Data)
-# La col A queda vacía (None), los datos van desde col B
+# CONFIGURACIÓN DE COLUMNAS Y ESTILOS
 # ─────────────────────────────────────────────────────────────
+
+# Estructura de columnas esperada (Info Ariba)
 INFO_ARIBA_HEADERS = [
     None,                                               # col A – siempre vacía
     'ID de contrato',
@@ -54,245 +52,195 @@ INFO_ARIBA_HEADERS = [
     'sum(Importe Monto total Contrato)',
     'Sample',
 ]
- 
-# Columnas pivot → nombres esperados en Info Ariba (para renombrar si difieren)
-PIVOT_RENAME = {
-    'Fecha de termino de notificaciones de garantía - Fecha': 'Fecha de termino de notificaciones de garantía - Fecha',
+
+# Estilos
+STYLE_HEADER = {
+    'fill': PatternFill(start_color="FFE7E6E6", end_color="FFE7E6E6", fill_type="solid"),
+    'font': Font(name='Arial', size=8, bold=True),
+    'alignment': Alignment(horizontal='center', vertical='center', wrap_text=True),
+    'border': Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
 }
- 
- 
-def find_header_row(xl_path: Path, sheet: str) -> int:
+
+STYLE_DATA = {
+    'font': Font(name='Arial', size=8),
+    'border': Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
+}
+
+
+def find_header_row(xl_path: Path) -> int:
     """Encuentra la fila (0-indexed para pandas) donde está 'ID de contrato'."""
-    df = pd.read_excel(xl_path, sheet_name=sheet, header=None, nrows=30, engine='openpyxl')
+    df = pd.read_excel(xl_path, sheet_name='Data', header=None, nrows=30, engine='openpyxl')
     for i, row in df.iterrows():
-        if 'ID de contrato' in row.values:
+        # Busca en toda la fila por si hay espacios o variaciones
+        if any('ID de contrato' in str(val) for val in row if pd.notna(val)):
             return i
-    raise ValueError(f"No se encontró 'ID de contrato' en la hoja '{sheet}' de {xl_path.name}")
- 
- 
-def read_pivot(pivot_path: Path) -> pd.DataFrame:
-    """Lee la hoja Data del Pivot y retorna un DataFrame limpio."""
-    header_idx = find_header_row(pivot_path, 'Data')
+    raise ValueError("No se encontró la fila de encabezados 'ID de contrato' en la hoja Data.")
+
+
+def read_and_clean_pivot(pivot_path: Path) -> pd.DataFrame:
+    """Lee el Pivot, limpia datos y reordena columnas."""
+    header_idx = find_header_row(pivot_path)
+    
+    # Leemos el archivo usando la fila de encabezado encontrada
     df = pd.read_excel(pivot_path, sheet_name='Data', header=header_idx, engine='openpyxl')
+    
+    # Eliminamos filas y columnas completamente vacías
     df = df.dropna(how='all').dropna(axis=1, how='all')
-    # Renombrar columnas si hace falta
-    df = df.rename(columns=PIVOT_RENAME)
-    return df
- 
- 
-def clear_info_ariba(ws):
-    """Borra todas las filas de datos de Info Ariba (deja solo la fila 1 de header)."""
-    if ws.max_row > 1:
-        ws.delete_rows(2, ws.max_row - 1)
- 
- 
-def write_info_ariba(ws, df: pd.DataFrame):
-    """
-    Escribe los datos del pivot en la hoja Info Ariba.
-    Estructura: col A vacía, col B = 'ID de contrato', etc.
-    """
-    # Asegurar que los headers estén en fila 1
+    
+    # Normalizamos los nombres de las columnas para asegurar el match
+    # A veces Ariba pone espacios extra
+    df.columns = [col.strip() if isinstance(col, str) else col for col in df.columns]
+    
+    # Reordenamos columnas para que coincidan con INFO_ARIBA_HEADERS
+    # Las columnas que no están en la lista se ignoran, las que faltan se dejan vacías
+    final_columns = [col for col in INFO_ARIBA_HEADERS if col is not None]
+    df_final = pd.DataFrame()
+    
+    # Aseguramos que la columna vacía (A) exista
+    df_final[None] = None 
+    
+    for col_name in final_columns:
+        if col_name in df.columns:
+            df_final[col_name] = df[col_name]
+        else:
+            df_final[col_name] = None # Columna vacía si falta en el pivot
+
+    return df_final
+
+
+def create_consolidado_workbook(df: pd.DataFrame) -> str:
+    """Crea un archivo Excel nuevo con formato de Consolidado."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Info Ariba"
+
+    # 1. Escribir Encabezados
     for col_idx, header in enumerate(INFO_ARIBA_HEADERS, start=1):
-        ws.cell(row=1, column=col_idx).value = header
- 
-    # Escribir datos fila a fila desde fila 2
-    pivot_cols = [h for h in INFO_ARIBA_HEADERS if h is not None]
- 
-    for row_idx, (_, row) in enumerate(df.iterrows(), start=2):
-        ws.cell(row=row_idx, column=1).value = None   # col A siempre vacía
-        for col_offset, col_name in enumerate(pivot_cols, start=2):
-            val = row.get(col_name, None)
-            # Convertir NaN / NaT a None
-            try:
-                if pd.isna(val):
-                    val = None
-            except (TypeError, ValueError):
-                pass
-            ws.cell(row=row_idx, column=col_offset).value = val
- 
- 
-def update_consolidado_new_rows(ws_cons, ws_ia, existing_ids: set):
-    """
-    Agrega al Consolidado de Contratos las filas del pivot que son nuevas
-    (no existen en la hoja Antiguo ni en el consolidado actual).
-    Copia las fórmulas del último row existente adaptando el número de fila.
-    """
-    # Encontrar última fila con ID real (col A no vacía)
-    last_data_row = 1
-    for r in range(2, ws_cons.max_row + 1):
-        if ws_cons.cell(row=r, column=1).value:
-            last_data_row = r
- 
-    # IDs ya en el consolidado
-    cons_ids = {ws_cons.cell(row=r, column=1).value for r in range(2, ws_cons.max_row + 1)}
- 
-    # IDs en Info Ariba
-    new_ids = []
-    for r in range(2, ws_ia.max_row + 1):
-        cw_id = ws_ia.cell(row=r, column=2).value
-        if cw_id and cw_id not in cons_ids and cw_id not in existing_ids:
-            new_ids.append(cw_id)
- 
-    if not new_ids:
-        return 0
- 
-    # Fórmulas plantilla de la última fila con datos reales
-    template_row = last_data_row
-    template_formulas = {}
-    for col in range(1, ws_cons.max_column + 1):
-        template_formulas[col] = ws_cons.cell(row=template_row, column=col).value
- 
-    # Estilos del header
-    thin = Border(
-        left=Side('hair'), right=Side('hair'),
-        top=Side('hair'), bottom=Side('hair')
-    )
-    data_font = Font(name='Arial', size=8)
-    data_align = Alignment(horizontal='center', vertical='center', wrap_text=False)
- 
-    next_row = last_data_row + 1
-    for new_id in new_ids:
-        new_row = next_row
-        next_row += 1
-        for col in range(1, ws_cons.max_column + 1):
-            cell = ws_cons.cell(row=new_row, column=col)
-            if col == 1:
-                cell.value = new_id
-            else:
-                tmpl = template_formulas.get(col)
-                if isinstance(tmpl, str) and tmpl.startswith('='):
-                    # Reemplazar número de fila de referencia en la fórmula
-                    updated = tmpl.replace(str(template_row), str(new_row))
-                    cell.value = updated
-                else:
-                    cell.value = None
-            cell.font = data_font
-            cell.border = thin
-            cell.alignment = data_align
- 
-    return len(new_ids)
- 
- 
-def apply_header_style(ws):
-    """Aplica el estilo del header al consolidado (fila 1)."""
-    hdr_fill = PatternFill('solid', fgColor='FFE7E6E6')
-    hdr_font = Font(name='Arial', size=8, bold=True)
-    hdr_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    thin = Border(
-        left=Side('hair'), right=Side('hair'),
-        top=Side('hair'), bottom=Side('hair')
-    )
-    for col in range(1, ws.max_column + 1):
-        cell = ws.cell(row=1, column=col)
-        cell.fill = hdr_fill
-        cell.font = hdr_font
-        cell.alignment = hdr_align
-        cell.border = thin
+        cell = ws.cell(row=1, column=col_idx)
+        cell.value = header
+        cell.fill = STYLE_HEADER['fill']
+        cell.font = STYLE_HEADER['font']
+        cell.alignment = STYLE_HEADER['alignment']
+        cell.border = STYLE_HEADER['border']
+
+    # Altura de la fila de encabezado para que se vea el texto
     ws.row_dimensions[1].height = 45
- 
- 
-def main(pivot_path: str, consolidado_path: str, output_path: str = None):
-    pivot_path = Path(pivot_path)
-    consolidado_path = Path(consolidado_path)
-    output_path = Path(output_path) if output_path else consolidado_path
- 
-    if not pivot_path.exists():
-        raise FileNotFoundError(f"No se encontró el pivot: {pivot_path}")
-    if not consolidado_path.exists():
-        raise FileNotFoundError(f"No se encontró el consolidado: {consolidado_path}")
- 
-    # Copiar el consolidado al destino si es diferente
-    if output_path != consolidado_path:
-        shutil.copy2(consolidado_path, output_path)
- 
-    print(f"📂 Leyendo pivot: {pivot_path.name}")
-    df_pivot = read_pivot(pivot_path)
-    print(f"   → {len(df_pivot)} contratos encontrados en el pivot")
- 
-    print(f"📂 Abriendo consolidado: {output_path.name}")
-    wb = openpyxl.load_workbook(output_path)
- 
-    ws_ia = wb['Info Ariba']
-    ws_cons = wb['Consolidado de Contratos']
-    ws_ant = wb['Antiguo']
- 
-    # IDs que ya existen en Antiguo
-    existing_ids = {ws_ant.cell(row=r, column=1).value for r in range(2, ws_ant.max_row + 1)}
- 
-    print("🔄 Actualizando hoja Info Ariba con datos del pivot...")
-    clear_info_ariba(ws_ia)
-    write_info_ariba(ws_ia, df_pivot)
-    print(f"   → {len(df_pivot)} filas escritas en Info Ariba")
- 
-    print("🔄 Verificando contratos nuevos para agregar al Consolidado...")
-    added = update_consolidado_new_rows(ws_cons, ws_ia, existing_ids)
-    if added:
-        print(f"   → {added} contratos nuevos agregados al Consolidado")
-    else:
-        print("   → No hay contratos nuevos que agregar")
- 
-    # Re-aplicar estilos del header por si acaso
-    apply_header_style(ws_cons)
- 
-    # Mantener freeze y filtros
-    ws_cons.freeze_panes = 'E3'
-    ws_cons.auto_filter.ref = ws_cons.dimensions
- 
-    wb.save(output_path)
-    print(f"\n✅ Consolidado actualizado guardado en: {output_path.resolve()}")
-    return str(output_path)
- 
- 
+
+    # 2. Escribir Datos
+    # pivot_cols son los nombres de las columnas (excluyendo None)
+    pivot_cols = [h for h in INFO_ARIBA_HEADERS if h is not None]
+
+    for r_idx, (_, row_data) in enumerate(df.iterrows(), start=2):
+        # Columna A (vacía)
+        ws.cell(row=r_idx, column=1).value = None
+        ws.cell(row=r_idx, column=1).border = STYLE_DATA['border']
+        
+        # Resto de columnas
+        for c_idx, col_name in enumerate(pivot_cols, start=2):
+            val = row_data.get(col_name, None)
+            
+            # Limpieza de NaN / NaT
+            if pd.isna(val):
+                val = None
+            
+            cell = ws.cell(row=r_idx, column=c_idx)
+            cell.value = val
+            cell.font = STYLE_DATA['font']
+            cell.border = STYLE_DATA['border']
+            # Centramos texto numérico y fechas, alineamos a la izquierda texto largo
+            if isinstance(val, (int, float)):
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+            elif isinstance(val, pd.Timestamp):
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+                cell.number_format = 'DD/MM/YYYY'
+
+    # 3. Filtros y Paneles
+    max_row = ws.max_row
+    max_col = ws.max_column
+    
+    # AutoFilter en toda la tabla
+    ws.auto_filter.ref = f"A1:{get_column_letter(max_col)}{max_row}"
+    
+    # Inmovilizar paneles (similar a 'E3' en el original, ajustado a la estructura)
+    ws.freeze_panes = "B2"
+
+    # 4. Ajustar ancho de columnas (Opcional, pero ayuda a que se vea bien)
+    for column_cells in ws.columns:
+        max_length = 0
+        column = column_cells[0].column_letter
+        for cell in column_cells:
+            try:
+                if cell.value:
+                    max_length = max(max_length, len(str(cell.value)))
+            except:
+                pass
+        adjusted_width = min(max_length + 2, 40) # Tope de 40
+        ws.column_dimensions[column].width = adjusted_width
+
+    # Guardar temporalmente para retornar la ruta
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx", prefix="Consolidado_Trabajo_") as tmp_file:
+        wb.save(tmp_file.name)
+        return tmp_file.name
+
+
 # ─────────────────────────────────────────────────────────────
-# INTERFAZ STREAMLIT + MODO CLI ORIGINAL
+# INTERFAZ STREAMLIT
 # ─────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    # Detección simple para ejecutar en Streamlit o terminal
-    is_streamlit = False
-    try:
-        from streamlit.runtime.scriptrunner import get_script_run_ctx
-        if get_script_run_ctx() is not None:
-            is_streamlit = True
-    except Exception:
-        pass
- 
-    if is_streamlit:
-        st.set_page_config(page_title="Integrador Ariba → Consolidado", layout="centered")
-        st.title("🔄 Integrador Pivot SAP Ariba")
-        st.caption("Sube el Pivot y el Consolidado. El sistema actualizará `Info Ariba` y agregará contratos nuevos.")
- 
-        col1, col2 = st.columns(2)
-        with col1:
-            pivot_file = st.file_uploader("1. Archivo Pivot (.xlsx)", type=["xlsx"], key="pivot")
-        with col2:
-            consol_file = st.file_uploader("2. Consolidado Base (.xlsx)", type=["xlsx"], key="consol")
- 
-        if pivot_file and consol_file:
-            st.divider()
-            if st.button("🚀 Procesar Archivos", type="primary", use_container_width=True):
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    p_path = Path(tmpdir) / pivot_file.name
-                    c_path = Path(tmpdir) / "consolidado_base.xlsx"
-                    o_path = Path(tmpdir) / "Consolidado_Actualizado.xlsx"
- 
-                    p_path.write_bytes(pivot_file.getvalue())
-                    c_path.write_bytes(consol_file.getvalue())
- 
-                    try:
-                        result_path = main(str(p_path), str(c_path), str(o_path))
-                        with open(result_path, "rb") as f:
-                            st.download_button(
-                                label="📥 Descargar Consolidado Actualizado",
-                                data=f,
-                                file_name="Consolidado_Actualizado.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
-                        st.success("✅ Proceso completado sin errores.")
-                    except Exception as e:
-                        st.error(f"❌ Error durante el procesamiento: {e}")
-    else:
-        # Modo CLI original intacto
-        if len(sys.argv) < 3:
-            print("Uso: python pivot_to_consolidado.py <pivot.xlsx> <consolidado.xlsx> [salida.xlsx]")
-            sys.exit(1)
-        main(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+
+st.set_page_config(page_title="Generador Consolidado Ariba", layout="centered")
+st.title("📑 Generador de Consolidado de Trabajo")
+st.caption("Sube el archivo Pivot de Ariba y descarga el archivo formateado.")
+
+uploaded_file = st.file_uploader("Selecciona el archivo Pivot (.xlsx)", type=["xlsx"])
+
+if uploaded_file:
+    st.divider()
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.info(f"Archivo cargado: **{uploaded_file.name}**")
+    
+    with col2:
+        process_btn = st.button("🚀 Generar Archivo", type="primary", use_container_width=True)
+
+    if process_btn:
+        try:
+            with st.spinner("Procesando datos y aplicando formato..."):
+                # 1. Guardar upload temporal
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_in:
+                    tmp_in.write(uploaded_file.getvalue())
+                    pivot_path = Path(tmp_in.name)
+
+                # 2. Leer y limpiar
+                df_clean = read_and_clean_pivot(pivot_path)
+                st.success(f"✅ Se encontraron {len(df_clean)} registros válidos.")
+
+                # 3. Generar archivo final
+                output_path = create_consolidado_workbook(df_clean)
+
+                # 4. Descargar
+                with open(output_path, "rb") as f:
+                    st.download_button(
+                        label="📥 Descargar Consolidado de trabajo.xlsx",
+                        data=f,
+                        file_name="Consolidado de trabajo.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                
+                # Limpieza de temporales
+                os.unlink(pivot_path)
+                os.unlink(output_path)
+
+        except Exception as e:
+            st.error(f"❌ Ocurrió un error: {str(e)}")
+            st.exception(e)
