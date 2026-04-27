@@ -14,11 +14,13 @@ Si no se indica salida, sobreescribe el consolidado.
  
 import sys
 import shutil
+import tempfile
 from pathlib import Path
 import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+import streamlit as st
  
 # ─────────────────────────────────────────────────────────────
 # COLUMNAS ESPERADAS EN Info Ariba (igual que en el Pivot Data)
@@ -241,8 +243,56 @@ def main(pivot_path: str, consolidado_path: str, output_path: str = None):
     return str(output_path)
  
  
+# ─────────────────────────────────────────────────────────────
+# INTERFAZ STREAMLIT + MODO CLI ORIGINAL
+# ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Uso: python pivot_to_consolidado.py <pivot.xlsx> <consolidado.xlsx> [salida.xlsx]")
-        sys.exit(1)
-    main(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+    # Detección simple para ejecutar en Streamlit o terminal
+    is_streamlit = False
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        if get_script_run_ctx() is not None:
+            is_streamlit = True
+    except Exception:
+        pass
+ 
+    if is_streamlit:
+        st.set_page_config(page_title="Integrador Ariba → Consolidado", layout="centered")
+        st.title("🔄 Integrador Pivot SAP Ariba")
+        st.caption("Sube el Pivot y el Consolidado. El sistema actualizará `Info Ariba` y agregará contratos nuevos.")
+ 
+        col1, col2 = st.columns(2)
+        with col1:
+            pivot_file = st.file_uploader("1. Archivo Pivot (.xlsx)", type=["xlsx"], key="pivot")
+        with col2:
+            consol_file = st.file_uploader("2. Consolidado Base (.xlsx)", type=["xlsx"], key="consol")
+ 
+        if pivot_file and consol_file:
+            st.divider()
+            if st.button("🚀 Procesar Archivos", type="primary", use_container_width=True):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    p_path = Path(tmpdir) / pivot_file.name
+                    c_path = Path(tmpdir) / "consolidado_base.xlsx"
+                    o_path = Path(tmpdir) / "Consolidado_Actualizado.xlsx"
+ 
+                    p_path.write_bytes(pivot_file.getvalue())
+                    c_path.write_bytes(consol_file.getvalue())
+ 
+                    try:
+                        result_path = main(str(p_path), str(c_path), str(o_path))
+                        with open(result_path, "rb") as f:
+                            st.download_button(
+                                label="📥 Descargar Consolidado Actualizado",
+                                data=f,
+                                file_name="Consolidado_Actualizado.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                        st.success("✅ Proceso completado sin errores.")
+                    except Exception as e:
+                        st.error(f"❌ Error durante el procesamiento: {e}")
+    else:
+        # Modo CLI original intacto
+        if len(sys.argv) < 3:
+            print("Uso: python pivot_to_consolidado.py <pivot.xlsx> <consolidado.xlsx> [salida.xlsx]")
+            sys.exit(1)
+        main(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
