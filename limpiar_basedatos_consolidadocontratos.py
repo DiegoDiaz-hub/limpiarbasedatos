@@ -6,6 +6,7 @@ from openpyxl.utils import get_column_letter
 import tempfile
 import os
 import warnings
+import re
 
 warnings.filterwarnings('ignore')
 
@@ -30,7 +31,8 @@ TYPO_CORRECTIONS = {
     'juan daniel figueroa': 'Juan Figueroa',
     'joseph eduardo españa escalona': 'Joseph España',
     'michelle esperanza': 'Michelle Palma',
-    'leonardo nacarete': 'Leonardo Nacarate'
+    'leonardo nacarete': 'Leonardo Nacarate',
+    'martina fuentes': 'Martina Fuentes'
 }
 
 def normalize_name(name: str) -> str:
@@ -67,24 +69,24 @@ TARGET_HEADERS = [
     'Observación Control Contratistas Boleta de Garantía', 'Contratos Indefinidos', 'Observación Interna'
 ]
 
-# 🔄 MAPEO REAL DE CAMPOS ARIBA → CONSOLIDADO (Nombres técnicos del Pivot)
-ARIBA_FIELD_MAP = {
+# 🔄 MAPEO: Campos técnicos de Ariba → Columnas del Consolidado
+ARIBA_TO_CONSOLIDADO = {
     'ContractId': 'Contrato Sap',
-    'Contract.ContractName': 'Contrato Legado',
+    'ProjectInfo.ProjectName': 'Contrato Legado',
     'Owner.UserName': 'Comprador Estratégico',
     'ContractStatus': 'Estado Contrato Ariba',
-    'UF_string11': 'Rut',  # Rut empresa proveedor
-    'UF_string10': 'Cód SAP',  # Código acreedor SAP
+    'UF_string11': 'Rut',
+    'UF_string10': 'Cód SAP',
     'AffectedParties.CommonSupplierName': 'Proveedor',
     'EffectiveDate.Day': 'Fecha Inicio',
     'ExpirationDate.Day': 'Fecha Término Contrato',
     'Description': 'Descripción',
-    'Region.RegionNameL2': 'Área',  # Puede ser Área o Región
+    'Region.RegionNameL2': 'Área',
     'IsEvergreen': 'Contratos Indefinidos',
     'UF_boolean1': 'Aplica Boleta de Garantía (Ariba)',
     'UF_string23': 'Tipo Garantía',
     'UF_time6.Day': 'Vencimiento Garantía',
-    'BeginDate.Day': 'Fecha de entrada en vigor - Fecha',  # Backup
+    'sum(Amount)': 'Monto Garantía',
 }
 
 STYLES = {
@@ -103,45 +105,60 @@ STYLES = {
 
 COLUMN_WIDTHS = [14, 16, 20, 16, 20, 16, 12, 38, 14, 18, 16, 45, 16, 16, 12, 14, 26, 32, 14, 14, 14, 16, 16, 14, 20, 22, 35, 45, 18, 45]
 
-def load_pivot(file_path: str) -> pd.DataFrame:
-    """Carga el Pivot de Ariba detectando la hoja Data y saltando metadatos."""
-    try:
-        # Intentar leer hoja 'Data' primero
-        if 'Data' in pd.ExcelFile(file_path).sheet_names:
-            df_scan = pd.read_excel(file_path, sheet_name='Data', header=None, nrows=50)
-        else:
-            df_scan = pd.read_excel(file_path, header=None, nrows=50)
-    except:
-        df_scan = pd.read_excel(file_path, header=None, nrows=50)
+def load_pivot_ariba(file_path: str) -> pd.DataFrame:
+    """
+    Carga el Pivot de Ariba con formato especial:
+    - Fila con 'Raw_Field_Names' tiene todos los headers concatenados por coma
+    - Los datos reales vienen en filas posteriores
+    """
+    # Leer primeras filas para detectar estructura
+    df_raw = pd.read_excel(file_path, header=None, nrows=100)
     
-    # Buscar fila de encabezados reales (donde aparece ContractId o ID de contrato)
-    header_row = None
-    for i, row in df_scan.iterrows():
+    # Buscar fila con 'Raw_Field_Names'
+    header_row_idx = None
+    for i, row in df_raw.iterrows():
         row_str = ' '.join(str(v).lower() for v in row if pd.notna(v))
-        if 'contractid' in row_str or 'id de contrato' in row_str:
-            header_row = i
+        if 'raw_field_names' in row_str:
+            header_row_idx = i
             break
     
-    if header_row is None:
-        # Fallback: usar fila 12 típica de exports de Ariba
-        header_row = 12
+    if header_row_idx is None:
+        raise ValueError("No se encontró la fila 'Raw_Field_Names' con los encabezados del Pivot.")
     
-    # Leer con el header detectado
-    try:
-        df = pd.read_excel(file_path, sheet_name='Data', header=header_row)
-    except:
-        df = pd.read_excel(file_path, header=header_row)
+    # Extraer y parsear los nombres de columnas desde la celda concatenada
+    raw_headers_cell = df_raw.iloc[header_row_idx, 2]  # Columna C típicamente
+    if pd.isna(raw_headers_cell):
+        # Intentar en otras columnas
+        for col in range(df_raw.shape[1]):
+            val = df_raw.iloc[header_row_idx, col]
+            if pd.notna(val) and 'ContractId' in str(val):
+                raw_headers_cell = val
+                break
     
-    # Limpiar nombres de columnas
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
+    # Separar por coma y limpiar
+    column_names = [c.strip() for c in str(raw_headers_cell).split(',') if c.strip()]
+    
+    # Leer los datos reales (saltando filas de metadata)
+    data_start_row = header_row_idx + 1
+    df_data = pd.read_excel(file_path, header=None, skiprows=range(data_start_row), engine='openpyxl')
+    
+    # Asignar nombres de columna
+    if len(column_names) <= df_data.shape[1]:
+        df_data.columns = column_names + [f'Unnamed_{i}' for i in range(len(column_names), df_data.shape[1])]
+    else:
+        df_data.columns = column_names[:df_data.shape[1]]
+    
+    # Limpiar filas vacías
+    df_data = df_data.dropna(how='all').reset_index(drop=True)
+    
+    return df_data
 
 def transform_data(df_pivot: pd.DataFrame) -> tuple:
     """Transforma datos del Pivot Ariba al formato Consolidado."""
     df_out = pd.DataFrame(columns=TARGET_HEADERS)
     
     # 1. Mapeo de campos Ariba → Consolidado
-    for ariba_col, target_col in ARIBA_FIELD_MAP.items():
+    for ariba_col, target_col in ARIBA_TO_CONSOLIDADO.items():
         if ariba_col in df_pivot.columns and target_col in df_out.columns:
             df_out[target_col] = df_pivot[ariba_col].copy()
     
@@ -155,14 +172,6 @@ def transform_data(df_pivot: pd.DataFrame) -> tuple:
         classified = raw_owners.apply(classify_buyer_strict)
         df_out['Comprador Estratégico'] = [x[1] if x[0] == 'strategic' else '' for x in classified]
         df_out['Comprador Táctico'] = [x[1] if x[0] == 'tactical' else '' for x in classified]
-    else:
-        # Si no hay Owner.UserName, intentar con columna alternativa
-        alt_owner = [c for c in df_pivot.columns if 'owner' in c.lower() or 'propietario' in c.lower()]
-        if alt_owner:
-            raw_owners = df_pivot[alt_owner[0]].fillna('').astype(str)
-            classified = raw_owners.apply(classify_buyer_strict)
-            df_out['Comprador Estratégico'] = [x[1] if x[0] == 'strategic' else '' for x in classified]
-            df_out['Comprador Táctico'] = [x[1] if x[0] == 'tactical' else '' for x in classified]
     
     # 🗑️ Eliminar filas sin compradores válidos
     mask_valid_buyer = (df_out['Comprador Estratégico'] != '') | (df_out['Comprador Táctico'] != '')
@@ -243,19 +252,19 @@ def apply_formatting(df: pd.DataFrame, output_path: str):
 # ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Generador Consolidado Ariba", layout="centered")
 st.title("📑 Generador de Consolidado de Contratos")
-st.caption("Sube el Pivot de Ariba. Se mapearán los campos técnicos correctamente.")
+st.caption("Sube el Pivot de Ariba. Se parsearán los campos técnicos correctamente.")
 
 uploaded_file = st.file_uploader("📥 Archivo Pivot (.xlsx)", type=["xlsx"])
 
 if uploaded_file:
-    with st.spinner("Leyendo Pivot, mapeando campos y validando compradores..."):
+    with st.spinner("Parseando Pivot de Ariba, validando compradores y aplicando formato..."):
         try:
             with tempfile.NamedTemporaryFile(delete=False, suffix="_pivot.xlsx") as tmp:
                 tmp.write(uploaded_file.getvalue())
                 pivot_path = tmp.name
             
-            df_pivot = load_pivot(pivot_path)
-            st.info(f"📊 Pivot cargado: {len(df_pivot)} filas, columnas: {list(df_pivot.columns)[:10]}...")
+            df_pivot = load_pivot_ariba(pivot_path)
+            st.info(f"📊 Pivot cargado: {len(df_pivot)} filas, columnas detectadas: {len([c for c in df_pivot.columns if 'Unnamed' not in c])}")
             
             df_final, dropped_invalid, dropped_cerrados = transform_data(df_pivot)
             
